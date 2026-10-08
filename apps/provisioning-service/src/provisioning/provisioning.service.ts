@@ -12,6 +12,8 @@ import {
 export class ProvisioningService implements OnModuleInit {
   private readonly logger = new Logger(ProvisioningService.name);
 
+  private readonly processedEvents = new Set<string>();
+
   constructor(
     @Inject('KAFKA_CLIENT') private readonly kafkaClient: ClientKafka,
   ) {}
@@ -25,8 +27,16 @@ export class ProvisioningService implements OnModuleInit {
   }
 
   async processActivationRequested(event: ActivationRequestedEvent) {
-    const { correlationId, customerId, payload } = event;
+    const { eventId, correlationId, customerId, payload } = event;
     const now = new Date().toISOString();
+
+    if (this.processedEvents.has(eventId)) {
+      this.logger.warn(
+        `🛡️ [Idempotencia] Evento [${eventId}] ya fue procesado en provisioning. Descartando duplicado.`,
+      );
+      return;
+    }
+    this.processedEvents.add(eventId);
 
     this.logger.log(
       `[provisioning-service] Iniciando aprovisionamiento para cliente [${customerId}], plan [${payload.planId}] (activationId=${correlationId})...`,

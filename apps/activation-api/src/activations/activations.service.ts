@@ -8,6 +8,7 @@ import {
   EventEnvelope,
   TOPICS,
 } from '@poc/event-contracts';
+import { ActivationsGateway } from './activations.gateway';
 import { CreateActivationDto } from './dto/create-activation.dto';
 
 export interface ActivationRecord {
@@ -27,7 +28,11 @@ export interface ActivationRecord {
     };
     provisioning?: { status: string; at: string; reason?: string };
   };
-  history: Array<{ eventType: string; at: string }>;
+  history: Array<{
+    eventType: string;
+    at: string;
+    details?: Record<string, unknown>;
+  }>;
 }
 
 @Injectable()
@@ -36,8 +41,11 @@ export class ActivationsService implements OnModuleInit {
 
   private readonly activations = new Map<string, ActivationRecord>();
 
+  private readonly processedEvents = new Set<string>();
+
   constructor(
     @Inject('KAFKA_CLIENT') private readonly kafkaClient: ClientKafka,
+    private readonly gateway: ActivationsGateway,
   ) {}
 
   async onModuleInit() {
@@ -63,6 +71,11 @@ export class ActivationsService implements OnModuleInit {
         {
           eventType: 'ActivationRequested',
           at: now,
+          details: {
+            planId: dto.planId,
+            channel: 'web',
+            simulateFailure: dto.simulateFailure || 'none',
+          },
         },
       ],
     };
@@ -93,11 +106,34 @@ export class ActivationsService implements OnModuleInit {
       value: event,
     });
 
+    this.gateway.emitActivationUpdate({
+      activationId,
+      customerId: dto.customerId,
+      planId: dto.planId,
+      eventType: 'ActivationRequested',
+      status: 'PENDING',
+      details: {
+        planId: dto.planId,
+        channel: 'web',
+        simulateFailure: dto.simulateFailure || 'none',
+      },
+      timestamp: now,
+    });
+
     return record;
   }
 
   async handleBillingEvent(event: EventEnvelope<any>) {
-    const { correlationId, eventType, occurredAt, payload } = event;
+    const { eventId, correlationId, eventType, occurredAt, payload } = event;
+
+    if (this.processedEvents.has(eventId)) {
+      this.logger.warn(
+        `🛡️ [Idempotencia] Evento de billing [${eventId}] (${eventType}) ya procesado en agregador. Descartando.`,
+      );
+      return;
+    }
+    this.processedEvents.add(eventId);
+
     const record = this.activations.get(correlationId);
 
     if (!record) {
@@ -125,12 +161,32 @@ export class ActivationsService implements OnModuleInit {
       };
     }
 
-    record.history.push({ eventType, at: occurredAt });
+    record.history.push({ eventType, at: occurredAt, details: payload });
+
+    this.gateway.emitActivationUpdate({
+      activationId: correlationId,
+      customerId: record.customerId,
+      planId: record.planId,
+      eventType,
+      status: record.status === 'PENDING' ? 'IN_PROGRESS' : record.status,
+      details: payload,
+      timestamp: occurredAt,
+    });
+
     this.evaluateActivationStatus(record);
   }
 
   async handleProvisioningEvent(event: EventEnvelope<any>) {
-    const { correlationId, eventType, occurredAt, payload } = event;
+    const { eventId, correlationId, eventType, occurredAt, payload } = event;
+
+    if (this.processedEvents.has(eventId)) {
+      this.logger.warn(
+        `🛡️ [Idempotencia] Evento de provisioning [${eventId}] (${eventType}) ya procesado en agregador. Descartando.`,
+      );
+      return;
+    }
+    this.processedEvents.add(eventId);
+
     const record = this.activations.get(correlationId);
 
     if (!record) {
@@ -157,7 +213,18 @@ export class ActivationsService implements OnModuleInit {
       };
     }
 
-    record.history.push({ eventType, at: occurredAt });
+    record.history.push({ eventType, at: occurredAt, details: payload });
+
+    this.gateway.emitActivationUpdate({
+      activationId: correlationId,
+      customerId: record.customerId,
+      planId: record.planId,
+      eventType,
+      status: record.status === 'PENDING' ? 'IN_PROGRESS' : record.status,
+      details: payload,
+      timestamp: occurredAt,
+    });
+
     this.evaluateActivationStatus(record);
   }
 
@@ -203,11 +270,22 @@ export class ActivationsService implements OnModuleInit {
       record.history.push({
         eventType: 'ActivationFailed',
         at: record.updatedAt,
+        details: { reason: failureReason },
       });
 
       this.kafkaClient.emit(TOPICS.ACTIVATION_EVENTS, {
         key: record.customerId,
         value: failedEvent,
+      });
+
+      this.gateway.emitActivationUpdate({
+        activationId: record.activationId,
+        customerId: record.customerId,
+        planId: record.planId,
+        eventType: 'ActivationFailed',
+        status: 'FAILED',
+        details: { reason: failureReason },
+        timestamp: record.updatedAt,
       });
 
       return;
@@ -237,11 +315,22 @@ export class ActivationsService implements OnModuleInit {
       record.history.push({
         eventType: 'ActivationCompleted',
         at: record.updatedAt,
+        details: { planId: record.planId },
       });
 
       this.kafkaClient.emit(TOPICS.ACTIVATION_EVENTS, {
         key: record.customerId,
         value: completedEvent,
+      });
+
+      this.gateway.emitActivationUpdate({
+        activationId: record.activationId,
+        customerId: record.customerId,
+        planId: record.planId,
+        eventType: 'ActivationCompleted',
+        status: 'ACTIVE',
+        details: { planId: record.planId },
+        timestamp: record.updatedAt,
       });
     }
   }

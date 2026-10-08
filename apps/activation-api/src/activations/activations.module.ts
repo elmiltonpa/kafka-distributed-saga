@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { ActivationsAggregatorController } from './activations-aggregator.controller';
 import { ActivationsController } from './activations.controller';
+import { ActivationsGateway } from './activations.gateway';
 import { ActivationsService } from './activations.service';
 
 @Module({
@@ -21,7 +22,7 @@ import { ActivationsService } from './activations.service';
     ]),
   ],
   controllers: [ActivationsController, ActivationsAggregatorController],
-  providers: [ActivationsService],
-  exports: [ActivationsService],
+  providers: [ActivationsService, ActivationsGateway],
+  exports: [ActivationsService, ActivationsGateway],
 })
 export class ActivationsModule {}
