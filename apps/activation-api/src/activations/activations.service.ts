@@ -8,6 +8,7 @@ import {
   EventEnvelope,
   TOPICS,
 } from '@poc/event-contracts';
+import { DlqService, IdempotencyService, MongoClientService } from '@poc/kafka-toolkit';
 import { ActivationsGateway } from './activations.gateway';
 import { CreateActivationDto } from './dto/create-activation.dto';
 
@@ -38,20 +39,36 @@ export interface ActivationRecord {
 @Injectable()
 export class ActivationsService implements OnModuleInit {
   private readonly logger = new Logger(ActivationsService.name);
-
   private readonly activations = new Map<string, ActivationRecord>();
-
-  private readonly processedEvents = new Set<string>();
 
   constructor(
     @Inject('KAFKA_CLIENT') private readonly kafkaClient: ClientKafka,
     private readonly gateway: ActivationsGateway,
+    private readonly idempotencyService: IdempotencyService,
+    private readonly dlqService: DlqService,
+    private readonly mongoService: MongoClientService,
   ) {}
 
   async onModuleInit() {
     this.logger.log('Conectando Kafka producer en activation-api...');
     await this.kafkaClient.connect();
     this.logger.log('Kafka producer conectado exitosamente.');
+  }
+
+  private async persistActivation(record: ActivationRecord) {
+    this.activations.set(record.activationId, record);
+    const db = this.mongoService.getDb();
+    if (db) {
+      try {
+        await db.collection('activations').updateOne(
+          { _id: record.activationId as any },
+          { $set: { ...record, _id: record.activationId } },
+          { upsert: true },
+        );
+      } catch (err) {
+        this.logger.warn(`Error al persistir activación en Mongo: ${err}`);
+      }
+    }
   }
 
   async requestActivation(dto: CreateActivationDto): Promise<ActivationRecord> {
@@ -80,7 +97,7 @@ export class ActivationsService implements OnModuleInit {
       ],
     };
 
-    this.activations.set(activationId, record);
+    await this.persistActivation(record);
 
     const event: ActivationRequestedEvent = {
       eventId: randomUUID(),
@@ -98,7 +115,7 @@ export class ActivationsService implements OnModuleInit {
     };
 
     this.logger.log(
-      `[Saga Agregador] Publicando ActivationRequested en topico "${TOPICS.ACTIVATION_REQUESTED}" [key=${dto.customerId}, activationId=${activationId}]`,
+      `[Saga Agregador] Publicando ActivationRequested en tópico "${TOPICS.ACTIVATION_REQUESTED}" [key=${dto.customerId}, activationId=${activationId}]`,
     );
 
     this.kafkaClient.emit(TOPICS.ACTIVATION_REQUESTED, {
@@ -124,112 +141,115 @@ export class ActivationsService implements OnModuleInit {
   }
 
   async handleBillingEvent(event: EventEnvelope<any>) {
-    const { eventId, correlationId, eventType, occurredAt, payload } = event;
+    await this.dlqService.executeWithRetry(TOPICS.BILLING_EVENTS, event, async () => {
+      const { eventId, correlationId, eventType, occurredAt, payload } = event;
 
-    if (this.processedEvents.has(eventId)) {
-      this.logger.warn(
-        `🛡️ [Idempotencia] Evento de billing [${eventId}] (${eventType}) ya procesado en agregador. Descartando.`,
+      const alreadyProcessed = await this.idempotencyService.isAlreadyProcessed(eventId, 'activation-api');
+      if (alreadyProcessed) {
+        this.logger.warn(
+          `🛡️ [Idempotencia] Evento de billing [${eventId}] (${eventType}) ya procesado en agregador. Descartando.`,
+        );
+        return;
+      }
+
+      const record = this.activations.get(correlationId);
+      if (!record) {
+        this.logger.warn(
+          `[Agregador] Evento de billing ignorado: activationId [${correlationId}] no existe.`,
+        );
+        return;
+      }
+
+      this.logger.log(
+        `[Agregador] Recibido evento de billing: ${eventType} para activationId [${correlationId}]`,
       );
-      return;
-    }
-    this.processedEvents.add(eventId);
 
-    const record = this.activations.get(correlationId);
+      if (eventType === 'BillingAccountCreated') {
+        record.steps.billing = {
+          status: 'OK',
+          at: occurredAt,
+          billingAccountId: payload.billingAccountId,
+        };
+      } else if (eventType === 'BillingFailed') {
+        record.steps.billing = {
+          status: 'FAILED',
+          at: occurredAt,
+          reason: payload.reason,
+        };
+      }
 
-    if (!record) {
-      this.logger.warn(
-        `[Agregador] Evento de billing ignorado: activationId [${correlationId}] no existe.`,
-      );
-      return;
-    }
+      record.history.push({ eventType, at: occurredAt, details: payload });
 
-    this.logger.log(
-      `[Agregador] Recibido evento de billing: ${eventType} para activationId [${correlationId}]`,
-    );
+      this.gateway.emitActivationUpdate({
+        activationId: correlationId,
+        customerId: record.customerId,
+        planId: record.planId,
+        eventType,
+        status: record.status === 'PENDING' ? 'IN_PROGRESS' : record.status,
+        details: payload,
+        timestamp: occurredAt,
+      });
 
-    if (eventType === 'BillingAccountCreated') {
-      record.steps.billing = {
-        status: 'OK',
-        at: occurredAt,
-        billingAccountId: payload.billingAccountId,
-      };
-    } else if (eventType === 'BillingFailed') {
-      record.steps.billing = {
-        status: 'FAILED',
-        at: occurredAt,
-        reason: payload.reason,
-      };
-    }
-
-    record.history.push({ eventType, at: occurredAt, details: payload });
-
-    this.gateway.emitActivationUpdate({
-      activationId: correlationId,
-      customerId: record.customerId,
-      planId: record.planId,
-      eventType,
-      status: record.status === 'PENDING' ? 'IN_PROGRESS' : record.status,
-      details: payload,
-      timestamp: occurredAt,
-    });
-
-    this.evaluateActivationStatus(record);
+      await this.evaluateActivationStatus(record);
+    }, this.kafkaClient);
   }
 
   async handleProvisioningEvent(event: EventEnvelope<any>) {
-    const { eventId, correlationId, eventType, occurredAt, payload } = event;
+    await this.dlqService.executeWithRetry(TOPICS.PROVISIONING_EVENTS, event, async () => {
+      const { eventId, correlationId, eventType, occurredAt, payload } = event;
 
-    if (this.processedEvents.has(eventId)) {
-      this.logger.warn(
-        `🛡️ [Idempotencia] Evento de provisioning [${eventId}] (${eventType}) ya procesado en agregador. Descartando.`,
+      const alreadyProcessed = await this.idempotencyService.isAlreadyProcessed(eventId, 'activation-api');
+      if (alreadyProcessed) {
+        this.logger.warn(
+          `🛡️ [Idempotencia] Evento de provisioning [${eventId}] (${eventType}) ya procesado en agregador. Descartando.`,
+        );
+        return;
+      }
+
+      const record = this.activations.get(correlationId);
+      if (!record) {
+        this.logger.warn(
+          `[Agregador] Evento de provisioning ignorado: activationId [${correlationId}] no existe.`,
+        );
+        return;
+      }
+
+      this.logger.log(
+        `[Agregador] Recibido evento de provisioning: ${eventType} para activationId [${correlationId}]`,
       );
-      return;
-    }
-    this.processedEvents.add(eventId);
 
-    const record = this.activations.get(correlationId);
+      if (eventType === 'ProvisioningCompleted') {
+        record.steps.provisioning = {
+          status: 'OK',
+          at: occurredAt,
+        };
+      } else if (eventType === 'ProvisioningFailed') {
+        record.steps.provisioning = {
+          status: 'FAILED',
+          at: occurredAt,
+          reason: payload.reason,
+        };
+      }
 
-    if (!record) {
-      this.logger.warn(
-        `[Agregador] Evento de provisioning ignorado: activationId [${correlationId}] no existe.`,
-      );
-      return;
-    }
+      record.history.push({ eventType, at: occurredAt, details: payload });
 
-    this.logger.log(
-      `[Agregador] Recibido evento de provisioning: ${eventType} para activationId [${correlationId}]`,
-    );
+      this.gateway.emitActivationUpdate({
+        activationId: correlationId,
+        customerId: record.customerId,
+        planId: record.planId,
+        eventType,
+        status: record.status === 'PENDING' ? 'IN_PROGRESS' : record.status,
+        details: payload,
+        timestamp: occurredAt,
+      });
 
-    if (eventType === 'ProvisioningCompleted') {
-      record.steps.provisioning = {
-        status: 'OK',
-        at: occurredAt,
-      };
-    } else if (eventType === 'ProvisioningFailed') {
-      record.steps.provisioning = {
-        status: 'FAILED',
-        at: occurredAt,
-        reason: payload.reason,
-      };
-    }
-
-    record.history.push({ eventType, at: occurredAt, details: payload });
-
-    this.gateway.emitActivationUpdate({
-      activationId: correlationId,
-      customerId: record.customerId,
-      planId: record.planId,
-      eventType,
-      status: record.status === 'PENDING' ? 'IN_PROGRESS' : record.status,
-      details: payload,
-      timestamp: occurredAt,
-    });
-
-    this.evaluateActivationStatus(record);
+      await this.evaluateActivationStatus(record);
+    }, this.kafkaClient);
   }
 
-  private evaluateActivationStatus(record: ActivationRecord) {
+  private async evaluateActivationStatus(record: ActivationRecord) {
     if (record.status === 'ACTIVE' || record.status === 'FAILED') {
+      await this.persistActivation(record);
       return;
     }
 
@@ -251,7 +271,7 @@ export class ActivationsService implements OnModuleInit {
         'Fallo en uno de los servicios';
 
       this.logger.error(
-        `🚨 [Saga Agregador] Activacion fallida para [${record.activationId}]. Motivo: ${failureReason}`,
+        `🚨 [Saga Agregador] Activación fallida para [${record.activationId}]. Motivo: ${failureReason}`,
       );
 
       const failedEvent: ActivationFailedEvent = {
@@ -272,6 +292,8 @@ export class ActivationsService implements OnModuleInit {
         at: record.updatedAt,
         details: { reason: failureReason },
       });
+
+      await this.persistActivation(record);
 
       this.kafkaClient.emit(TOPICS.ACTIVATION_EVENTS, {
         key: record.customerId,
@@ -296,7 +318,7 @@ export class ActivationsService implements OnModuleInit {
       record.updatedAt = new Date().toISOString();
 
       this.logger.log(
-        `✅ [Saga Agregador] Activacion completada con exito para [${record.activationId}]. Estado -> ACTIVE`,
+        `✅ [Saga Agregador] Activación completada con éxito para [${record.activationId}]. Estado -> ACTIVE`,
       );
 
       const completedEvent: ActivationCompletedEvent = {
@@ -318,6 +340,8 @@ export class ActivationsService implements OnModuleInit {
         details: { planId: record.planId },
       });
 
+      await this.persistActivation(record);
+
       this.kafkaClient.emit(TOPICS.ACTIVATION_EVENTS, {
         key: record.customerId,
         value: completedEvent,
@@ -332,7 +356,10 @@ export class ActivationsService implements OnModuleInit {
         details: { planId: record.planId },
         timestamp: record.updatedAt,
       });
+      return;
     }
+
+    await this.persistActivation(record);
   }
 
   getActivation(id: string): ActivationRecord | undefined {

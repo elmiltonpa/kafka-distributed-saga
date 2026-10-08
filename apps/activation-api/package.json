@@ -29,7 +29,9 @@
     "@nestjs/platform-socket.io": "^12.1.2",
     "@nestjs/websockets": "^12.1.2",
     "@poc/event-contracts": "workspace:*",
+    "@poc/kafka-toolkit": "workspace:*",
     "kafkajs": "^2.2.4",
+    "mongodb": "^6.14.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "socket.io": "^4.8.4"

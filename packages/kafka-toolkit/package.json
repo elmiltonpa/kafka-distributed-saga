@@ -1,0 +1,22 @@
+{
+  "name": "@poc/kafka-toolkit",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@nestjs/common": "^12.0.1",
+    "@nestjs/microservices": "^12.1.2",
+    "@poc/event-contracts": "workspace:*",
+    "kafkajs": "^2.2.4",
+    "mongodb": "^6.14.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "7.0.2"
+  }
+}

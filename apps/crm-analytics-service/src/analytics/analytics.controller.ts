@@ -8,22 +8,22 @@ export class AnalyticsController {
   constructor(private readonly analyticsService: AnalyticsService) {}
 
   @EventPattern(TOPICS.ACTIVATION_REQUESTED)
-  handleActivationRequested(@Payload() event: EventEnvelope<unknown>) {
-    this.analyticsService.recordEvent(TOPICS.ACTIVATION_REQUESTED, event);
+  async handleActivationRequested(@Payload() event: EventEnvelope<unknown>) {
+    await this.analyticsService.recordEvent(TOPICS.ACTIVATION_REQUESTED, event);
   }
 
   @EventPattern(TOPICS.BILLING_EVENTS)
-  handleBillingEvents(@Payload() event: EventEnvelope<unknown>) {
-    this.analyticsService.recordEvent(TOPICS.BILLING_EVENTS, event);
+  async handleBillingEvents(@Payload() event: EventEnvelope<unknown>) {
+    await this.analyticsService.recordEvent(TOPICS.BILLING_EVENTS, event);
   }
 
   @EventPattern(TOPICS.PROVISIONING_EVENTS)
-  handleProvisioningEvents(@Payload() event: EventEnvelope<unknown>) {
-    this.analyticsService.recordEvent(TOPICS.PROVISIONING_EVENTS, event);
+  async handleProvisioningEvents(@Payload() event: EventEnvelope<unknown>) {
+    await this.analyticsService.recordEvent(TOPICS.PROVISIONING_EVENTS, event);
   }
 
   @EventPattern(TOPICS.ACTIVATION_EVENTS)
-  handleActivationEvents(@Payload() event: EventEnvelope<unknown>) {
-    this.analyticsService.recordEvent(TOPICS.ACTIVATION_EVENTS, event);
+  async handleActivationEvents(@Payload() event: EventEnvelope<unknown>) {
+    await this.analyticsService.recordEvent(TOPICS.ACTIVATION_EVENTS, event);
   }
 }

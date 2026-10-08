@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ClientsModule, Transport } from '@nestjs/microservices';
+import { KafkaToolkitModule } from '@poc/kafka-toolkit';
 import { ProvisioningController } from './provisioning.controller';
 import { ProvisioningService } from './provisioning.service';
 
@@ -18,6 +19,9 @@ import { ProvisioningService } from './provisioning.service';
         },
       },
     ]),
+    KafkaToolkitModule.register({
+      dbName: 'provisioning_db',
+    }),
   ],
   controllers: [ProvisioningController],
   providers: [ProvisioningService],

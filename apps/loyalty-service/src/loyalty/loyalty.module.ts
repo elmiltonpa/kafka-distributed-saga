@@ -1,8 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { KafkaToolkitModule } from '@poc/kafka-toolkit';
-import { BillingController } from './billing.controller';
-import { BillingService } from './billing.service';
+import { LoyaltyController } from './loyalty.controller';
+import { LoyaltyService } from './loyalty.service';
 
 @Module({
   imports: [
@@ -12,7 +12,7 @@ import { BillingService } from './billing.service';
         transport: Transport.KAFKA,
         options: {
           client: {
-            clientId: 'billing-service-producer',
+            clientId: 'loyalty-service-producer',
             brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
           },
           producerOnlyMode: true,
@@ -20,11 +20,11 @@ import { BillingService } from './billing.service';
       },
     ]),
     KafkaToolkitModule.register({
-      dbName: 'billing_db',
+      dbName: 'loyalty_db',
     }),
   ],
-  controllers: [BillingController],
-  providers: [BillingService],
-  exports: [BillingService],
+  controllers: [LoyaltyController],
+  providers: [LoyaltyService],
+  exports: [LoyaltyService],
 })
-export class BillingModule {}
+export class LoyaltyModule {}

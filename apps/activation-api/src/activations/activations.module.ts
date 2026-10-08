@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ClientsModule, Transport } from '@nestjs/microservices';
+import { KafkaToolkitModule } from '@poc/kafka-toolkit';
 import { ActivationsAggregatorController } from './activations-aggregator.controller';
 import { ActivationsController } from './activations.controller';
 import { ActivationsGateway } from './activations.gateway';
@@ -20,6 +21,9 @@ import { ActivationsService } from './activations.service';
         },
       },
     ]),
+    KafkaToolkitModule.register({
+      dbName: 'activation_db',
+    }),
   ],
   controllers: [ActivationsController, ActivationsAggregatorController],
   providers: [ActivationsService, ActivationsGateway],
