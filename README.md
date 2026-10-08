@@ -1,159 +1,134 @@
-# Turborepo starter
+# Event-Driven Service Activation Engine
 
-This Turborepo starter is maintained by the Turborepo core team.
+A distributed, event-driven microservices proof of concept demonstrating an **asynchronous choreographed Saga pattern** with Kafka, NestJS, and MongoDB.
 
-## Using this example
+This project showcases how to eliminate synchronous HTTP bottlenecks between services during high-volume lifecycle operations (e.g., service activations, checkout, provisioning) by coordinating state through distributed log events, idempotent consumers, automated compensating transactions, and dead-letter queues (DLQ).
 
-Run the following command:
+---
 
-```sh
-npx create-turbo@latest
+## Architecture Highlights & Backend Patterns
+
+- **Choreographed Saga with State Aggregator**: Eliminates direct service-to-service HTTP dependencies. Services act autonomously upon receiving domain events, while `activation-api` aggregates parallel task completions to finalize or abort the saga.
+- **Compensating Transactions (Rollbacks)**: If any step fails (e.g., technical provisioning error), an `ActivationFailed` event triggers automatic rollbacks across preceding services (e.g., cancelling the billing account).
+- **Strict Partition Key Ordering**: Events are partitioned by `customerId` across Kafka partitions, guaranteeing strict FIFO order per customer while scaling horizontally across consumer instances.
+- **Idempotent Consumers**: Every consumer verifies event uniqueness against transactional storage (`processed_events`) before execution, ensuring safe message replay and preventing duplicate side-effects.
+- **Fault Tolerance & Dead Letter Queues (DLQ)**: Configured with exponential retry intervals. Persistent technical failures are diverted to dedicated `<topic>.dlq` topics without blocking partition progress.
+- **Event Sourcing & Stream Replay**: Decoupled event logs allow new downstream consumers (e.g., `loyalty-service`) to replay historical event logs (`auto.offset.reset: earliest`) without impacting production producers.
+- **Monorepo Architecture (Turborepo + pnpm)**: Centralized TypeScript repository featuring strictly typed contracts (`@poc/event-contracts`) and shared Kafka reliability decorators/helpers (`@poc/kafka-toolkit`).
+
+---
+
+### Event Envelope Format
+
+All events published to Kafka follow a structured, versioned schema:
+
+```json
+{
+  "eventId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "eventType": "ActivationRequested",
+  "version": 1,
+  "occurredAt": "2026-10-08T02:00:00.000Z",
+  "correlationId": "act-9842",
+  "customerId": "C-1042",
+  "source": "activation-api",
+  "payload": {
+    "planId": "FIBER-500MB",
+    "channel": "web",
+    "simulateFailure": "none"
+  }
+}
 ```
 
-## What's inside?
+---
 
-This Turborepo includes the following packages/apps:
+## Services & Modules
 
-### Apps and Packages
+### Applications (`apps/`)
 
-- `docs`: a [Next.js](https://nextjs.org/) app
-- `web`: another [Next.js](https://nextjs.org/) app
-- `@repo/ui`: a stub React component library shared by both `web` and `docs` applications
-- `@repo/eslint-config`: `eslint` configurations (includes `@next/eslint-plugin-next` and `eslint-config-prettier`)
-- `@repo/typescript-config`: `tsconfig.json`s used throughout the monorepo
+| Service | Technology | Role & Key Responsibilities |
+| :--- | :--- | :--- |
+| **`activation-api`** | NestJS, Socket.io | Public HTTP ingestion gateway (`POST /activations`), WebSocket event emitter, and Saga state aggregator. |
+| **`billing-service`** | NestJS, KafkaJS | Creates customer billing accounts and listens for `ActivationFailed` to trigger compensating cancellations. |
+| **`provisioning-service`** | NestJS, KafkaJS | Simulates hardware/network provisioning with configurable latencies and fault injection. |
+| **`notification-service`** | NestJS, Nodemailer | Consumes lifecycle termination events and dispatches asynchronous emails to Mailhog. |
+| **`crm-analytics-service`** | NestJS, KafkaJS | Passive event audit logger demonstrating total producer-consumer decoupling. |
+| **`loyalty-service`** | NestJS, KafkaJS | Demonstrates late-joining consumer stream replay from partition offset `0`. |
+| **`web`** | React 19, Vite, Tailwind | Interactive dashboard featuring failure injection toggles and real-time WebSocket event timeline. |
 
-Each package/app is 100% [TypeScript](https://www.typescriptlang.org/).
+### Shared Packages (`packages/`)
 
-### Utilities
+- **`@poc/event-contracts`**: Shared TypeScript interfaces, topic constants, event schemas, and enum definitions.
+- **`@poc/kafka-toolkit`**: Reusable Kafka utilities, retry logic, DLQ routing, consumer idempotency middleware, and event builders.
 
-This Turborepo has some additional tools already setup for you:
+---
 
-- [TypeScript](https://www.typescriptlang.org/) for static type checking
-- [ESLint](https://eslint.org/) for code linting
-- [Prettier](https://prettier.io) for code formatting
+## Infrastructure Stack
 
-### Build
+- **Apache Kafka (KRaft mode)**: Single-broker setup operating without ZooKeeper. 3 partitions per topic with retention policies.
+- **Kafka UI (`kafbat/kafka-ui`)**: Web dashboard for real-time partition, consumer group lag, and topic inspection.
+- **MongoDB (Single-node Replica Set)**: Provides multi-document ACID transactions across service-isolated collections and idempotency tables.
+- **Mailhog**: Local SMTP server with browser-based inbox for verifying dispatched notifications.
 
-To build all apps and packages, run the following command:
+---
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
+## Getting Started
 
-```sh
-cd my-turborepo
-turbo build
+### Prerequisites
+
+- **Node.js** (v20+ recommended)
+- **pnpm** (v9+)
+- **Docker** & **Docker Compose**
+
+### 1. Start Infrastructure Containers
+
+```bash
+docker compose up -d
 ```
 
-Without global `turbo`, use your package manager:
+Verify containers are healthy via `docker compose ps` (Kafka, MongoDB, Mailhog, and Kafka UI).
 
-```sh
-cd my-turborepo
-npx turbo build
-pnpm exec turbo build
-pnpm exec turbo build
+### 2. Install Dependencies & Build Workspace
+
+```bash
+pnpm install
+pnpm build
 ```
 
-You can build a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
+### 3. Run Microservices & Web Client
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo build --filter=docs
+```bash
+pnpm dev
 ```
 
-Without global `turbo`:
+Turborepo will concurrently start all backend microservices along with the frontend client.
 
-```sh
-npx turbo build --filter=docs
-pnpm exec turbo build --filter=docs
-pnpm exec turbo build --filter=docs
-```
+---
 
-### Develop
+## Endpoints & Dashboards
 
-To develop all apps and packages, run the following command:
+| Component | URL | Description |
+| :--- | :--- | :--- |
+| **Demo Web UI** | [http://localhost:5173](http://localhost:5173) | Frontend control panel & real-time WebSocket timeline |
+| **Activation API** | [http://localhost:3000](http://localhost:3000) | REST API & WebSocket server |
+| **Kafka UI** | [http://localhost:8080](http://localhost:8080) | Topic partitions, consumer offsets, and message viewer |
+| **Mailhog Web Inbox** | [http://localhost:8025](http://localhost:8025) | Simulated transactional email inspector |
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
+---
 
-```sh
-cd my-turborepo
-turbo dev
-```
+## Key Scenarios to Verify
 
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo dev
-pnpm exec turbo dev
-pnpm exec turbo dev
-```
-
-You can develop a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo dev --filter=web
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo dev --filter=web
-pnpm exec turbo dev --filter=web
-pnpm exec turbo dev --filter=web
-```
-
-### Remote Caching
-
-> [!TIP]
-> Vercel Remote Cache is free for all plans. Get started today at [vercel.com](https://vercel.com/signup?utm_source=remote-cache-sdk&utm_campaign=free_remote_cache).
-
-Turborepo can use a technique known as [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching) to share cache artifacts across machines, enabling you to share build caches with your team and CI/CD pipelines.
-
-By default, Turborepo will cache locally. To enable Remote Caching you will need an account with Vercel. If you don't have an account you can [create one](https://vercel.com/signup?utm_source=turborepo-examples), then enter the following commands:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo login
-```
-
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo login
-pnpm exec turbo login
-pnpm exec turbo login
-```
-
-This will authenticate the Turborepo CLI with your [Vercel account](https://vercel.com/docs/concepts/personal-accounts/overview).
-
-Next, you can link your Turborepo to your Remote Cache by running the following command from the root of your Turborepo:
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo link
-```
-
-Without global `turbo`:
-
-```sh
-npx turbo link
-pnpm exec turbo link
-pnpm exec turbo link
-```
-
-## Useful Links
-
-Learn more about the power of Turborepo:
-
-- [Tasks](https://turborepo.dev/docs/crafting-your-repository/running-tasks)
-- [Caching](https://turborepo.dev/docs/crafting-your-repository/caching)
-- [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching)
-- [Filtering](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters)
-- [Configuration Options](https://turborepo.dev/docs/reference/configuration)
-- [CLI Usage](https://turborepo.dev/docs/reference/command-line-reference)
+1. **Happy Path (Fan-out & Parallel Processing)**
+   - Submit an activation with `simulateFailure: 'none'`.
+   - Observe parallel processing across `billing` and `provisioning`, successful saga completion, and email notification delivery.
+2. **Saga Failure & Automatic Compensation**
+   - Submit an activation with `simulateFailure: 'provisioning'`.
+   - `provisioning-service` produces `ProvisioningFailed`.
+   - `activation-api` aggregates failure and issues `ActivationFailed`.
+   - `billing-service` receives the failure and issues a compensating `BillingAccountCancelled` event.
+3. **Consumer Lag & Broker Buffering (Resilience)**
+   - Stop a consumer: `docker compose stop notification-service` (or stop its local process).
+   - Trigger multiple activations. Check consumer lag accumulation in Kafka UI.
+   - Restart the consumer: all pending events are consumed without loss or duplication.
+4. **Partition Balancing & Scale-out**
+   - Scale billing workers: `docker compose up -d --scale billing-service=2`.
+   - Observe rebalancing of the 3 topic partitions across the consumer group in Kafka UI.
